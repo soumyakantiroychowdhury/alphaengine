@@ -111,7 +111,13 @@ if st.button("Generate Guidance"):
             st.markdown(f"<div style='background-color:{color}; padding:20px; border-radius:10px; text-align:center;'>"
                         f"<h1 style='color:white; margin:0;'>{action}</h1>"
                         f"<p style='color:white; margin:0;'>Score: {score}/100 | MACD Confirmed: {'YES' if latest['MACD_Hist'] > 0 else 'NO'}</p></div>", unsafe_allow_html=True)
-            
+
+            # Key Statistics
+            st.write("### 📊 Market Snapshot")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Current Price", f"{current_price:,.2f}")
+            c2.metric("Rel. Strength", f"{rs:+.1%}")
+            c3.metric("RVOL", f"{df_final['RVOL'].iloc[-1]:.2f}")
             # The "No Emotional Bias" Section
             st.write("### 🧠 Momentum Insight")
             macd_status = "Accelerating" if latest['MACD_Hist'] > df['MACD_Hist'].iloc[-2] else "Decelerating"
