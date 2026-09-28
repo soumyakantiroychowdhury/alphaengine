@@ -3,17 +3,17 @@ import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
 
-# --- HYBRID ALPHA ENGINE V2 (Horizon Aware) ---
-class AlphaEngineV2:
-    def __init__(self, ticker, target_pct, stop_pct, market, horizon_months):
+# --- HYBRID ALPHA ENGINE V3 (Momentum & Horizon Integrated) ---
+class AlphaEngineV3:
+    def __init__(self, ticker, target_pct, stop_loss_pct, market, horizon_months):
         self.ticker = ticker.strip().upper()
         self.target_pct = target_pct / 100
-        self.stop_pct = stop_pct / 100
+        self.stop_pct = stop_loss_pct / 100
         self.horizon = horizon_months
         self.benchmark_ticker = "^GSPC" if market == "US" else "^NSEI"
         
     def get_data(self):
-        # Dynamically fetch more history for longer horizons
+        # Fetching enough history for long-term indicators
         period = "2y" if self.horizon < 12 else "5y"
         df = yf.download(self.ticker, period=period, interval="1d", progress=False, multi_level_index=False)
         bench = yf.download(self.benchmark_ticker, period=period, interval="1d", progress=False, multi_level_index=False)
@@ -24,117 +24,118 @@ class AlphaEngineV2:
         info = yf.Ticker(self.ticker).info
         return df, bench, info
 
-    def calculate_score(self, df, bench, info):
-        close_price = df['Close']
-        bench_close = bench['Close']
+    def calculate_indicators(self, df, bench):
+        # 1. MACD CALCULATION (The "Pulse")
+        # Standard: 12-day EMA, 26-day EMA, 9-day Signal
+        exp1 = df['Close'].ewm(span=12, adjust=False).mean()
+        exp2 = df['Close'].ewm(span=26, adjust=False).mean()
+        df['MACD'] = exp1 - exp2
+        df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False).mean()
+        df['MACD_Hist'] = df['MACD'] - df['Signal_Line']
 
-        # --- DYNAMIC INDICATOR LOGIC ---
-        # Short horizon (1-4 mo): Focus on 20/50 SMA
-        # Long horizon (12+ mo): Focus on 50/200 SMA
+        # 2. HORIZON-ADAPTIVE SMA (The "Skeleton")
         if self.horizon <= 4:
-            fast_ma_p, slow_ma_p = 20, 50
-            rs_period = 21 # 1 month
+            fast, slow = 20, 50
+            rs_lookback = 21 
         elif self.horizon <= 12:
-            fast_ma_p, slow_ma_p = 50, 100
-            rs_period = 63 # 3 months
+            fast, slow = 50, 100
+            rs_lookback = 63
         else:
-            fast_ma_p, slow_ma_p = 50, 200
-            rs_period = 126 # 6 months
+            fast, slow = 50, 200
+            rs_lookback = 126
 
-        df['Fast_MA'] = close_price.rolling(fast_ma_p).mean()
-        df['Slow_MA'] = close_price.rolling(slow_ma_p).mean()
-        df['RVOL'] = df['Volume'] / df['Volume'].rolling(20).mean()
+        df['Fast_MA'] = df['Close'].rolling(fast).mean()
+        df['Slow_MA'] = df['Close'].rolling(slow).mean()
         
-        # Relative Strength vs Benchmark
-        stock_ret = ((close_price.iloc[-1] / close_price.iloc[-rs_period]) - 1)
-        bench_ret = ((bench_close.iloc[-1] / bench_close.iloc[-rs_period]) - 1)
+        # 3. RELATIVE STRENGTH
+        stock_ret = ((df['Close'].iloc[-1] / df['Close'].iloc[-rs_lookback]) - 1)
+        bench_ret = ((bench['Close'].iloc[-1] / bench['Close'].iloc[-rs_lookback]) - 1)
         rs_value = stock_ret - bench_ret
         
-        score = 0
+        return df, rs_value, fast, slow
+
+    def get_score(self, df, rs_value, info):
         latest = df.iloc[-1]
+        prev = df.iloc[-2]
+        score = 0
         
-        # 1. Trend Factor (50%)
-        if latest['Close'] > latest['Fast_MA']: score += 25
-        if latest['Fast_MA'] > latest['Slow_MA']: score += 25
+        # A. TREND COMPONENT (40%)
+        if latest['Close'] > latest['Fast_MA']: score += 20
+        if latest['Fast_MA'] > latest['Slow_MA']: score += 20
         
-        # 2. Relative Strength (25%)
-        if rs_value > 0: score += 25
+        # B. MACD MOMENTUM COMPONENT (30%) - RESTORED
+        # Bullish if MACD is above Signal Line AND Histogram is increasing
+        if latest['MACD'] > latest['Signal_Line']: score += 15
+        if latest['MACD_Hist'] > prev['MACD_Hist']: score += 15
         
-        # 3. Volume & Fundamentals (25%)
-        if latest['RVOL'] > 1.1: score += 15
-        growth = info.get('earningsQuarterlyGrowth')
-        if growth and growth > 0.1: score += 10
+        # C. RELATIVE STRENGTH (20%)
+        if rs_value > 0: score += 20
         
-        return round(score, 1), rs_value, latest['Close'], df, fast_ma_p, slow_ma_p
+        # D. FUNDAMENTAL QUALITY (10%)
+        roe = info.get('returnOnEquity', 0)
+        if roe > 0.15: score += 10
+        
+        return score
 
-# --- STREAMLIT UI ---
-st.set_page_config(page_title="Alpha Engine Pro", layout="centered")
+# --- UI LAYER ---
+st.set_page_config(page_title="Alpha Engine v3", layout="centered")
+st.title("🚀 Alpha Engine v3")
+st.markdown("#### Precision Momentum + Horizon Logic")
 
-st.title("🚀 Alpha Engine v2")
-st.markdown("### Strategic Medium-to-Long Term Guidance")
-
-# Sidebar Configuration
-st.sidebar.header("🎯 Strategy Setup")
-market_type = st.sidebar.selectbox("Market", ["India", "US"])
-ticker_input = st.sidebar.text_input("Ticker", "RELIANCE.NS" if market_type == "India" else "AAPL")
-
-# THE NEW INPUT: Investment Horizon
-horizon = st.sidebar.slider("Investment Horizon (Months)", min_value=1, max_value=24, value=3, help="Adjusts indicators: shorter = faster MAs, longer = slower trend-following MAs.")
-
-target_profit = st.sidebar.number_input("Target Profit (%)", 5, 50, 12)
-stop_loss = st.sidebar.number_input("Stop Loss (%)", 3, 20, 5)
+# Sidebar
+st.sidebar.header("User Settings")
+market = st.sidebar.selectbox("Market", ["India", "US"])
+ticker = st.sidebar.text_input("Ticker", "RELIANCE.NS" if market == "India" else "NVDA")
+horizon = st.sidebar.slider("Investment Horizon (Months)", 1, 24, 3)
+target = st.sidebar.number_input("Target Profit %", 5, 50, 12)
+stop = st.sidebar.number_input("Stop Loss %", 3, 20, 5)
 
 if st.button("Generate Guidance"):
-    with st.spinner('Analyzing time-series and fundamental data...'):
-        engine = AlphaEngineV2(ticker_input, target_profit, stop_loss, market_type, horizon)
+    with st.spinner("Decoding Momentum Signals..."):
+        engine = AlphaEngineV3(ticker, target, stop, market, horizon)
         df, bench, info = engine.get_data()
         
         if df is not None:
-            score, rs, current_price, df_final, f_ma, s_ma = engine.calculate_score(df, bench, info)
+            df, rs, f_ma, s_ma = engine.calculate_indicators(df, bench)
+            score = engine.get_score(df, rs, info)
             
-            # Action Recommendation
-            if score >= 75: status, color = "STRONG BUY", "#00c853"
-            elif score >= 50: status, color = "HOLD / ACCUMULATE", "#ffab00"
-            else: status, color = "AVOID / EXIT", "#d50000"
-
-            # Mobile-friendly Header
-            st.markdown(f"""
-                <div style="background-color:{color}; padding:15px; border-radius:10px; text-align:center;">
-                    <h1 style="color:white; margin:0;">{status}</h1>
-                    <p style="color:white; margin:0; font-size:1.2em;">Score: {score}/100 | Horizon: {horizon} Months</p>
-                </div>
-            """, unsafe_allow_html=True)
-
-            # Key Statistics
-            st.write("### 📊 Market Snapshot")
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Current Price", f"{current_price:,.2f}")
-            c2.metric("Rel. Strength", f"{rs:+.1%}")
-            c3.metric("RVOL", f"{df_final['RVOL'].iloc[-1]:.2f}")
-
-            # Guidance Cards
-            st.info(f"""
-            **Guidance for {horizon}-month horizon:**
-            - **Indicator Logic:** Using {f_ma} & {s_ma} day SMA for trend analysis.
-            - **Target Exit:** {current_price*(1+(target_profit/100)):,.2f} (+{target_profit}%)
-            - **Stop Loss:** {current_price*(1-(stop_loss/100)):,.2f} (-{stop_loss}%)
-            - **ROE:** {info.get('returnOnEquity', 0):.2%} | **Debt/Equity:** {info.get('debtToEquity', 0)/100:.2f}
-            """)
-
-            # Horizon-Adjusted Charting
-            # We show ~2x the horizon in the chart for context
-            chart_lookback = horizon * 30 * 2 
-            plot_df = df_final.tail(chart_lookback)
+            latest = df.iloc[-1]
+            price = latest['Close']
             
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['Close'], name="Price"))
-            fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['Fast_MA'], name=f"{f_ma} SMA", line=dict(dash='dot')))
-            fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['Slow_MA'], name=f"{s_ma} SMA", line=dict(width=2)))
-            fig.update_layout(height=400, template="plotly_white", margin=dict(l=0, r=0, t=20, b=0), legend=dict(orientation="h", y=1.1))
-            st.plotly_chart(fig, use_container_width=True)
+            # Action Colors
+            if score >= 80: action, color = "STRONG BUY", "#00c853"
+            elif score >= 55: action, color = "HOLD / WATCH", "#ffab00"
+            else: action, color = "AVOID / EXIT", "#d50000"
+
+            # Result Dashboard
+            st.markdown(f"<div style='background-color:{color}; padding:20px; border-radius:10px; text-align:center;'>"
+                        f"<h1 style='color:white; margin:0;'>{action}</h1>"
+                        f"<p style='color:white; margin:0;'>Score: {score}/100 | MACD Confirmed: {'YES' if latest['MACD_Hist'] > 0 else 'NO'}</p></div>", unsafe_allow_html=True)
             
+            # The "No Emotional Bias" Section
+            st.write("### 🧠 Momentum Insight")
+            macd_status = "Accelerating" if latest['MACD_Hist'] > df['MACD_Hist'].iloc[-2] else "Decelerating"
+            st.info(f"The MACD Histogram is **{macd_status}**. This proves that the current price movement has **{'Real' if score > 70 else 'Weak'}** momentum behind it.")
+
+            # Charts
+            # 1. Price + SMA
+            fig_price = go.Figure()
+            plot_df = df.tail(horizon * 30 + 60)
+            fig_price.add_trace(go.Scatter(x=plot_df.index, y=plot_df['Close'], name="Price"))
+            fig_price.add_trace(go.Scatter(x=plot_df.index, y=plot_df['Fast_MA'], name=f"{f_ma} SMA", line=dict(dash='dot')))
+            fig_price.update_layout(height=300, template="plotly_white", margin=dict(l=0, r=0, t=20, b=0))
+            st.plotly_chart(fig_price, use_container_width=True)
+
+            # 2. MACD Histogram (The "Engine Room")
+            fig_macd = go.Figure()
+            fig_macd.add_trace(go.Bar(x=plot_df.index, y=plot_df['MACD_Hist'], name="MACD Histogram", marker_color='gray'))
+            fig_macd.update_layout(height=200, template="plotly_white", margin=dict(l=0, r=0, t=10, b=0))
+            st.plotly_chart(fig_macd, use_container_width=True)
+
+            # Trade Plan
+            st.write("---")
+            c1, c2 = st.columns(2)
+            c1.success(f"**Target:** {price*(1+(target/100)):,.2f}")
+            c2.error(f"**Stop:** {price*(1-(stop/100)):,.2f}")
         else:
-            st.error("Ticker not found. Remember: Use .NS for India (e.g., RELIANCE.NS)")
-
-st.divider()
-st.caption("Alpha Engine v2: Hybrid scoring adjusts automatically based on your intended holding period.")
+            st.error("Data fetch failed. Check ticker symbol.")
